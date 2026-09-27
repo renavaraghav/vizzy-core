@@ -160,15 +160,46 @@ export async function POST(request: Request) {
     }
   }
 
-  // Save each image as a PNG file in .vizzy-images
+  // Save each image and produce an ImageVersion with a self-contained Data URI
+  // to ensure 100% reliable rendering in Next.js <Image unoptimized /> and <img> tags across serverless cold starts.
   const versions = await Promise.all(
     generatedBuffers.map(async (buffer, index) => {
       const id = randomUUID();
-      await writeFile(path.join(imageDirectory, `${id}.png`), buffer);
+      // Detect image format from magic bytes (JPEG starts with 0xFF 0xD8 0xFF, PNG with 0x89 0x50 0x4E 0x47)
+      const isJpeg =
+        buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+      const mimeType = isJpeg ? "image/jpeg" : "image/png";
+      const ext = isJpeg ? "jpg" : "png";
+
+      // 1. Write to serverless / local filesystem as both .jpg/.png for backwards-compatible GET endpoint
+      try {
+        await writeFile(path.join(imageDirectory, `${id}.${ext}`), buffer);
+        await writeFile(path.join(imageDirectory, `${id}.png`), buffer);
+      } catch {
+        // Safe fallback in read-only filesystems
+      }
+
+      // 2. Populate in-memory cache for same-process zero-latency GET
+      if (typeof globalThis !== "undefined") {
+        const cache = (((globalThis as Record<string, unknown>).__vizzyImageCache ??= new Map<
+          string,
+          { buffer: Buffer; mimeType: string }
+        >()) as Map<string, { buffer: Buffer; mimeType: string }>);
+        cache.set(id, { buffer, mimeType });
+        if (cache.size > 50) {
+          const oldestKey = cache.keys().next().value;
+          if (oldestKey) cache.delete(oldestKey);
+        }
+      }
+
+      // 3. Construct self-contained Data URI (eliminates serverless 404s, CORS, and network latency)
+      const base64Data = buffer.toString("base64");
+      const dataUri = `data:${mimeType};base64,${base64Data}`;
+
       return {
         id,
         pageId,
-        imageUrl: `/api/page-images/${id}`,
+        imageUrl: dataUri,
         prompt,
         createdAt: new Date().toISOString(),
         selected: index === 0,

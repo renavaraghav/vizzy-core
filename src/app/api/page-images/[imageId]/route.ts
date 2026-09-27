@@ -36,17 +36,36 @@ export async function GET(
 
   // Prevent directory traversal
   const safeId = path.basename(imageId).replace(/[^a-zA-Z0-9_-]/g, "");
+
+  // 1. Check in-memory cache first (same serverless container instance)
+  if (typeof globalThis !== "undefined") {
+    const cache = (globalThis as Record<string, unknown>).__vizzyImageCache as
+      | Map<string, { buffer: Buffer; mimeType: string }>
+      | undefined;
+    const cached = cache?.get(safeId);
+    if (cached) {
+      return new Response(new Uint8Array(cached.buffer), {
+        status: 200,
+        headers: {
+          "Content-Type": cached.mimeType,
+          "Content-Length": String(cached.buffer.byteLength),
+          "Cache-Control": "public, max-age=86400, immutable",
+        },
+      });
+    }
+  }
+
   const imageDirectories = [
     path.join(process.cwd(), ".vizzy-images"),
     path.join(tmpdir(), "vizzy-images"),
   ];
 
-  // Check candidate filenames: .png, .jpg, or exact safeId across directories
+  // Check candidate filenames: .jpg, .png, or exact safeId across directories
   const candidatePaths: string[] = [];
   for (const dir of imageDirectories) {
     candidatePaths.push(
-      path.join(dir, `${safeId}.png`),
       path.join(dir, `${safeId}.jpg`),
+      path.join(dir, `${safeId}.png`),
       path.join(dir, safeId),
     );
   }
@@ -79,7 +98,17 @@ export async function GET(
     );
 
     const fileBuffer = await Promise.race([readPromise, timeoutPromise]);
-    const contentType = resolvedPath.endsWith(".jpg") ? "image/jpeg" : "image/png";
+    // Detect image format from magic bytes (JPEG starts with 0xFF 0xD8 0xFF)
+    const isJpeg =
+      fileBuffer.length > 3 &&
+      fileBuffer[0] === 0xff &&
+      fileBuffer[1] === 0xd8 &&
+      fileBuffer[2] === 0xff;
+    const contentType = isJpeg
+      ? "image/jpeg"
+      : resolvedPath.endsWith(".jpg")
+        ? "image/jpeg"
+        : "image/png";
 
     return new Response(new Uint8Array(fileBuffer), {
       status: 200,

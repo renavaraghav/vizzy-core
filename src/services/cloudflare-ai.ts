@@ -131,22 +131,39 @@ export async function generateCloudflareWorkersAIImage({
 
     const contentType = response.headers.get("content-type") || "";
 
-    // Binary image response (standard for Cloudflare image models)
+    // Binary image response (standard for some Cloudflare image models)
     if (contentType.includes("image") || contentType.includes("octet-stream")) {
       const arrayBuffer = await response.arrayBuffer();
-      return Buffer.from(arrayBuffer);
+      const buffer = Buffer.from(arrayBuffer);
+      if (buffer.length > 32) {
+        return buffer;
+      }
     }
 
-    // JSON response format with base64 image
+    // JSON response format with base64 image (standard for @cf/black-forest-labs/flux-1-schnell)
     const data = (await response.json()) as {
-      result?: { image?: string };
+      result?: { image?: string; images?: string[] };
       image?: string;
+      images?: string[];
       success?: boolean;
     };
 
-    const b64 = data?.result?.image || data?.image;
-    if (b64 && typeof b64 === "string") {
-      return Buffer.from(b64, "base64");
+    const rawBase64 =
+      data?.result?.image ||
+      data?.image ||
+      (Array.isArray(data?.result?.images) ? data.result.images[0] : null) ||
+      (Array.isArray(data?.images) ? data.images[0] : null);
+
+    if (rawBase64 && typeof rawBase64 === "string") {
+      // Strip any data URI prefix if present (e.g. data:image/jpeg;base64, or data:image/png;base64,)
+      const cleanB64 = rawBase64.replace(/^data:image\/\w+;base64,/, "").trim();
+      if (cleanB64) {
+        const buffer = Buffer.from(cleanB64, "base64");
+        // Ensure buffer contains valid image bytes
+        if (buffer.length > 32) {
+          return buffer;
+        }
+      }
     }
 
     return null;
